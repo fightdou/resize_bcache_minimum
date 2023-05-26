@@ -8,8 +8,10 @@ import (
     "path/filepath"
     "strings"
 	"strconv"
+	"time"
 	"regexp"
 
+	"github.com/dlclark/regexp2"
 	"github.com/spf13/cobra"
 	"github.com/wonderivan/logger"
 )
@@ -20,6 +22,7 @@ func GetCacheData(rate_debug_path string) (dirty float64, target float64) {
         fmt.Println("File reading error", err)
         return
     }
+	
     r := regexp.MustCompile(`dirty:\s*(\d+\.\d+)([kMG])\s*target:\s*(\d+\.\d+)([kMG])`)
     match := r.FindStringSubmatch(string(content))
 
@@ -37,8 +40,6 @@ func GetCacheData(rate_debug_path string) (dirty float64, target float64) {
 
     dirty = ToFloat(match[1])
     target = target_size
-	logger.Info("The current bcache dirty data is %f, target data is %f", dirty, target)
-
 	return dirty, target
 }
 
@@ -76,65 +77,114 @@ func main() {
 }
 
 func handler() {
-	root := "/sys/block/"
-    keyword := "bcache"
-	rate_path_postfix := "/bcache/writeback_rate_debug"
-	rate_minimum_path := "writeback_rate_minimum"
+	for {
+		root := "/sys/block/"
+		keyword := "bcache"
+		rate_path_postfix := "/bcache/writeback_rate_debug"
+		rate_minimum_path := "writeback_rate_minimum"
 
-	var bcache_rate_path []string
+		var bcache_rate_path []string
 
-    err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-        if err != nil {
-            return err
-        }
-
-        if !info.IsDir() && strings.Contains(info.Name(), keyword) {
-            rate_path := fmt.Sprintf(path + rate_path_postfix)
-			bcache_rate_path = append(bcache_rate_path, rate_path)
-        }
-        return nil
-    })
-	if err != nil {
-        fmt.Println(err)
-    }
-
-	// 获取 dirty, target 大小
-	for _, bcache_rate := range bcache_rate_path {
-		dirty, target := GetCacheData(bcache_rate)
-		rate := int(dirty / target)
-		bcache_writeback_rate_minimum := ""
-		bcache_dir := filepath.Dir(bcache_rate)
-		bcache_writeback_rate_minimum = bcache_dir + "/" + rate_minimum_path
-
-		if rate < 50 {
-			logger.Info("dirty data rate is less than 50.")
-		} else if rate <= 75 {
-			// 调整下刷速率为 2M
-			command := fmt.Sprintf("echo" + " " + percent_50_rate_minimum + " > " + bcache_writeback_rate_minimum)
-			cmd := exec.Command("sh", "-c", command)
-			stdoutStderr, err := cmd.CombinedOutput()
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				logger.Error("exec command error", stdoutStderr, err)
+				return err
 			}
-			logger.Info("dirty data rate is greater than 50 less than 75, resize bcache writeback rate minimum 2M")
-		} else if rate <= 90 {
-			// 调整下刷速率为 4M
-			command := fmt.Sprintf("echo" + " " + percent_75_rate_minimum + " > " + bcache_writeback_rate_minimum)
-			cmd := exec.Command("sh", "-c", command)
-			stdoutStderr, err := cmd.CombinedOutput()
-			if err != nil {
-				logger.Error("exec command error", stdoutStderr, err)
+
+			if !info.IsDir() && strings.Contains(info.Name(), keyword) {
+				rate_path := fmt.Sprintf(path + rate_path_postfix)
+				bcache_rate_path = append(bcache_rate_path, rate_path)
 			}
-			logger.Info("dirty data rate is greater than 50 less than 75, resize bcache writeback rate minimum 4M")
-		} else if rate > 90 {
-			// 调整下刷速率为 8M
-			command := fmt.Sprintf("echo" + " " + percent_90_rate_minimum + " > " + bcache_writeback_rate_minimum)
-			cmd := exec.Command("sh", "-c", command)
-			stdoutStderr, err := cmd.CombinedOutput()
-			if err != nil {
-				logger.Error("exec command error", stdoutStderr, err)
-			}
-			logger.Info("dirty data rate is greater than 50 less than 75, resize bcache writeback rate minimum 8M")
+			return nil
+		})
+		if err != nil {
+			fmt.Println(err)
 		}
+
+		for _, bcache_rate := range bcache_rate_path {
+			// 获取 dirty, target 大小
+			dirty, target := GetCacheData(bcache_rate)
+			// 获取当前 dirty 脏数据写入的比例
+			rate := int(dirty / target * 100)
+			logger.Info("The bcache disk %s dirty data rate is %d", bcache_rate, rate)
+
+			// 获取 bcache writeback_rate_minimum 路径
+			bcache_writeback_rate_minimum := ""
+			bcache_dir := filepath.Dir(bcache_rate)
+			bcache_writeback_rate_minimum = bcache_dir + "/" + rate_minimum_path
+
+			// 获取 bcache 设备名称
+			bcache_disk := ""
+			expr := `(?<=/sys/block/)[^/]+`
+			reg, _ := regexp2.Compile(expr, 0)
+			m, _ := reg.FindStringMatch(bcache_rate)
+			if m != nil {
+				bcache_disk = m.String()
+			}
+
+			// 查看当前 writeback_rate_minimum 值 
+			content, err := ioutil.ReadFile(bcache_writeback_rate_minimum)
+			if err != nil {
+				fmt.Println("File reading error", err)
+				return
+			}
+			file_rate_minimum, _ := strconv.Atoi(strings.Trim(string(content), "\n"))
+			logger.Info("The bcache disk %s current writeback rate minimum is %d", bcache_disk, file_rate_minimum)
+
+			if rate < 50 {
+				// 判断 writeback_rate_minimum 值是否被修改
+				if file_rate_minimum == 2048 {
+					logger.Info("The bcache disk %s dirty data rate is less than 50.", bcache_disk)
+					continue
+				}
+				// 将 writeback_rate_minimum 修改为初始值
+				command := fmt.Sprintf("echo" + " " + "2048" + " > " + bcache_writeback_rate_minimum)
+				cmd := exec.Command("sh", "-c", command)
+				stdoutStderr, err := cmd.CombinedOutput()
+				if err != nil {
+					logger.Error("exec command error", stdoutStderr, err)
+				}
+				logger.Info("The bcache disk %s dirty data rate is less than 50.", bcache_disk)
+			} else if rate > 50 && rate <= 75 {
+				// 调整下刷速率为 2M
+				percent_50_minimum, _ := strconv.Atoi(percent_50_rate_minimum)
+				if file_rate_minimum == percent_50_minimum {
+					continue
+				}
+				command := fmt.Sprintf("echo" + " " + percent_50_rate_minimum + " > " + bcache_writeback_rate_minimum)
+				cmd := exec.Command("sh", "-c", command)
+				stdoutStderr, err := cmd.CombinedOutput()
+				if err != nil {
+					logger.Error("exec command error", stdoutStderr, err)
+				}
+				logger.Info("The bcache disk %s dirty data rate is greater than 50 less than 75, resize bcache writeback rate minimum 2M", bcache_disk)
+			} else if rate > 75 && rate <= 90 {
+				// 调整下刷速率为 4M
+				percent_75_minimum, _ := strconv.Atoi(percent_75_rate_minimum)
+				if file_rate_minimum == percent_75_minimum {
+					continue
+				}
+				command := fmt.Sprintf("echo" + " " + percent_75_rate_minimum + " > " + bcache_writeback_rate_minimum)
+				cmd := exec.Command("sh", "-c", command)
+				stdoutStderr, err := cmd.CombinedOutput()
+				if err != nil {
+					logger.Error("exec command error", stdoutStderr, err)
+				}
+				logger.Info("The bcache disk %s dirty data rate is greater than 50 less than 75, resize bcache writeback rate minimum 4M", bcache_disk)
+			} else if rate > 90 {
+				// 调整下刷速率为 8M
+				percent_90_minimum, _ := strconv.Atoi(percent_90_rate_minimum)
+				if file_rate_minimum == percent_90_minimum {
+					continue
+				}
+				command := fmt.Sprintf("echo" + " " + percent_90_rate_minimum + " > " + bcache_writeback_rate_minimum)
+				cmd := exec.Command("sh", "-c", command)
+				stdoutStderr, err := cmd.CombinedOutput()
+				if err != nil {
+					logger.Error("exec command error", stdoutStderr, err)
+				}
+				logger.Info("The bcache disk %s dirty data rate is greater than 50 less than 75, resize bcache writeback rate minimum 8M", bcache_disk)
+			}
+		}
+		time.Sleep(time.Minute)
 	}
 }

@@ -3,6 +3,7 @@ module github.com/fightdou/resize_bcache_minimum
 go 1.17
 
 require (
+	github.com/dlclark/regexp2 v1.10.0
 	github.com/spf13/cobra v1.7.0
 	github.com/wonderivan/logger v1.0.0
 )
