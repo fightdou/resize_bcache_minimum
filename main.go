@@ -1,15 +1,15 @@
 package main
 
 import (
-    "fmt"
+	"fmt"
 	"io/ioutil"
-    "os"
-    "os/exec"
-    "path/filepath"
-    "strings"
-	"strconv"
-	"time"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/dlclark/regexp2"
 	"github.com/spf13/cobra"
@@ -18,13 +18,13 @@ import (
 
 func GetCacheData(rate_debug_path string) (dirty float64, target float64) {
 	content, err := ioutil.ReadFile(rate_debug_path)
-    if err != nil {
-        fmt.Println("File reading error", err)
-        return
-    }
-	
-    r := regexp.MustCompile(`dirty:\s*(\d+\.\d+)([kMG])\s*target:\s*(\d+\.\d+)([kMG])`)
-    match := r.FindStringSubmatch(string(content))
+	if err != nil {
+		fmt.Println("File reading error", err)
+		return
+	}
+
+	r := regexp.MustCompile(`dirty:\s*(\d+\.\d+)([kMG])\s*target:\s*(\d+\.\d+)([kMG])`)
+	match := r.FindStringSubmatch(string(content))
 
 	// match[1] dirty 脏数据的大小
 	// match[2] dirty 脏数据的单位 k,M,G
@@ -38,8 +38,8 @@ func GetCacheData(rate_debug_path string) (dirty float64, target float64) {
 		target_size = target_size * 1024 * 1024
 	}
 
-    dirty = ToFloat(match[1])
-    target = target_size
+	dirty = ToFloat(match[1])
+	target = target_size
 	return dirty, target
 }
 
@@ -52,9 +52,9 @@ func ToFloat(d_str string) (res float64) {
 }
 
 var (
-	percent_50_rate_minimum string   // 下刷速率 2M
-	percent_75_rate_minimum string   // 下刷速率 4M
-	percent_90_rate_minimum string   // 下刷速率 8M
+	percent_50_rate_minimum string // 下刷速率 2M
+	percent_75_rate_minimum string // 下刷速率 4M
+	percent_90_rate_minimum string // 下刷速率 8M
 )
 
 func main() {
@@ -70,10 +70,10 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&percent_75_rate_minimum, "percent_75_rate_minimum", "8192", "The dirty data rate is greater than 75 less than 90 resize minimum resize 4M/s")
 	rootCmd.PersistentFlags().StringVar(&percent_90_rate_minimum, "percent_90_rate_minimum", "16384", "The dirty data rate is greater than 90 resize 8M/s")
 
-    if err := rootCmd.Execute(); err != nil {
-        fmt.Println(err)
-        os.Exit(1)
-    }
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 }
 
 func handler() {
@@ -101,17 +101,6 @@ func handler() {
 		}
 
 		for _, bcache_rate := range bcache_rate_path {
-			// 获取 dirty, target 大小
-			dirty, target := GetCacheData(bcache_rate)
-			// 获取当前 dirty 脏数据写入的比例
-			rate := int(dirty / target * 100)
-			logger.Info("The bcache disk %s dirty data rate is %d", bcache_rate, rate)
-
-			// 获取 bcache writeback_rate_minimum 路径
-			bcache_writeback_rate_minimum := ""
-			bcache_dir := filepath.Dir(bcache_rate)
-			bcache_writeback_rate_minimum = bcache_dir + "/" + rate_minimum_path
-
 			// 获取 bcache 设备名称
 			bcache_disk := ""
 			expr := `(?<=/sys/block/)[^/]+`
@@ -121,7 +110,18 @@ func handler() {
 				bcache_disk = m.String()
 			}
 
-			// 查看当前 writeback_rate_minimum 值 
+			// 获取 dirty, target 大小
+			dirty, target := GetCacheData(bcache_rate)
+			// 获取当前 dirty 脏数据写入的比例
+			rate := int(dirty / target * 100)
+			logger.Info("The bcache disk %s dirty data rate is %d", bcache_disk, rate)
+
+			// 获取 bcache writeback_rate_minimum 路径
+			bcache_writeback_rate_minimum := ""
+			bcache_dir := filepath.Dir(bcache_rate)
+			bcache_writeback_rate_minimum = bcache_dir + "/" + rate_minimum_path
+
+			// 查看当前 writeback_rate_minimum 值
 			content, err := ioutil.ReadFile(bcache_writeback_rate_minimum)
 			if err != nil {
 				fmt.Println("File reading error", err)
